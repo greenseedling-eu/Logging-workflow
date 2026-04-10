@@ -10,7 +10,8 @@ function main() {
   const mijnLocale = "be";
   const nu = new Date(); // Maak een digitale momentopname van de huidige tijd en datum
   const ss = SpreadsheetApp.getActiveSpreadsheet(); // Open het Excel-bestand waar we in werken
-  const sheet = ss.getSheetByName("Logs"); // Zoek het tabblad met de naam "Logs"
+
+  const sheet = ss.getSheetByName("Logs");
 
   // We vertellen de spreadsheet dat we in de Belgische tijdzone en landinstelling werken
   ss.setSpreadsheetTimeZone(mijnTijdzone);
@@ -30,14 +31,14 @@ function main() {
   /**
    * STAP 2: DE POORTWACHTER (SLIDING WINDOW LOGICA)
    * Waarom? We willen voorkomen dat we elk uur dezelfde data ophalen. 
-   * Het script kijkt in de allerlaatste cel van de kolom AB (de tijdstempel-kolom).
+   * Het script kijkt in de allerlaatste cel van de kolom AH (nummer 34).
    */
   const lastRow = sheet.getLastRow(); // Hoeveel rijen zijn er nu in totaal?
   const vandaagLabel = Utilities.formatDate(nu, mijnTijdzone, "yyyy-MM-dd"); // Vandaag in tekst, bijv. "2026-04-07"
 
   if (lastRow > 1) { // Als de lijst niet leeg is...
-    // Haal de waarde op uit de allerlaatste cel in kolom AB (nummer 28)
-    const laatsteUpdateCel = sheet.getRange(lastRow, 28).getValue();
+    // Haal de waarde op uit de allerlaatste cel in kolom AH (nummer 34)
+    const laatsteUpdateCel = sheet.getRange(lastRow, 34).getValue();
 
     // Controleren we: is de datum in die cel gelijk aan de datum van vandaag?
     if (laatsteUpdateCel instanceof Date) {
@@ -76,20 +77,53 @@ function logDetailedWeatherViaMake(sheet, tz, timestamp) {
 
   // We vragen Make.com om de gegevens. De 'retry' functie zorgt dat we bij een bezette lijn later terugbellen.
   const response = callMakeWithRetry(fullUrl);
+
+  // console.log("HTTP status code: " + response.getResponseCode());
+  // console.log("JSON payload");
+  // console.log(response.getContentText());
+
   const res = JSON.parse(response.getContentText()); // De ruwe tekst omzetten in een digitale mappenstructuur
 
   const daily = res.daily;   // De map met daggegevens
   const hourly = res.hourly; // De map met uurgegevens
+  const hourlyPollen = res.hourlyPollen; // De map met uurgegevens van de pollen data
 
   /**
    * HULPMIDDEL: getAvgForDay
    * Een klein rekenmachientje om het gemiddelde van 24 losse uren te berekenen.
    */
   const getAvgForDay = (arr, d) => {
-    const start = d * 24; // Bereken waar de dag begint in de lijst van uren
-    const daySlice = arr.slice(start, start + 24); // Pak een 'hap' van 24 uur uit de lijst
-    const sum = daySlice.reduce((a, b) => a + b, 0); // Tel alle waarden bij elkaar op
-    return sum / daySlice.length; // Deel door 24 om het gemiddelde te krijgen
+    // Check of de lijst überhaupt bestaat en niet leeg is
+    if (!arr || !Array.isArray(arr) || arr.length === 0) {
+      // console.warn("Waarschuwing: Geen data gevonden voor dag " + d);
+      return 0; // Geef een 0 terug als de data ontbreekt, zo crasht de rest niet
+    }
+
+    const start = d * 24;
+    const daySlice = arr.slice(start, start + 24);
+
+    if (daySlice.length === 0) return 0;
+
+    const sum = daySlice.reduce((a, b) => a + b, 0);
+    return sum / daySlice.length;
+  };
+
+  const getMaxForDay = (arr, d) => {
+    // Controleer of de lijst bestaat
+    if (!arr || !Array.isArray(arr) || arr.length === 0) {
+      return 0;
+    }
+
+    const start = d * 24;
+    const daySlice = arr.slice(start, start + 24);
+
+    // Math.max kan niet direct een lijst (array) lezen, 
+    // daarom gebruiken we de 'spread' operator (...) om de getallen eruit te strooien.
+    const max = Math.max(...daySlice);
+
+    // Als de lijst toevallig alleen uit nulls of foutieve data bestaat, 
+    // geeft Math.max soms -Infinity. Dit vangen we hier op:
+    return max === -Infinity ? 0 : max;
   };
 
   /**
@@ -133,75 +167,51 @@ function logDetailedWeatherViaMake(sheet, tz, timestamp) {
 
     /**
      * STAP 6: DE RIJ BOUWEN
-     * We maken een lange rij met alle verzamelde cijfers, van kolom A tot kolom AB.
+     * We maken een lange rij met alle verzamelde cijfers, van kolom A tot kolom AH.
      */
     const row = [
       Utilities.formatDate(new Date(daily.time[d]), tz, "yyyy-MM-dd"), // A: Datum
-      Number(daily.temperature_2m_min[d]),                            // B: Laagste luchttemp
-      Number(daily.apparent_temperature_min[d]),                     // C: Hoe koud het echt voelt
-      Number(daily.temperature_2m_max[d]),                            // D: Hoogste luchttemp
-      Number(daily.apparent_temperature_max[d]),                     // E: Hoogste gevoelstemp
+      Number(daily.temperature_2m_min[d]),                             // B: Laagste luchttemp
+      Number(daily.apparent_temperature_min[d]),                       // C: Hoe koud het echt voelt
+      Number(daily.temperature_2m_max[d]),                             // D: Hoogste luchttemp
+      Number(daily.apparent_temperature_max[d]),                       // E: Hoogste gevoelstemp
       Number(Math.min(...hourly.soil_temperature_0cm.slice(startUurIndex, startUurIndex + 24))), // F: Bevriest de grond?
-      Number(daily.precipitation_sum[d]),                             // G: Hoeveelheid regen in mm
-      Number(getAvgForDay(hourly.surface_pressure, d)),               // H: Luchtdruk (gemiddelde)
-      Number(daily.windspeed_10m_max[d] / 3.6),                       // I: Wind in meter per seconde
-      Number(daily.winddirection_10m_dominant[d]),                    // J: Waar komt de wind vandaan?
-      Number(getAvgForDay(hourly.relativehumidity_2m, d) / 100),      // K: Vochtigheid van de lucht
-      Number(getAvgForDay(hourly.soil_temperature_6cm, d)),           // L: Temperatuur van de aarde
-      Number(getAvgForDay(hourly.soil_moisture_3_to_9cm, d)),         // M: Hoe nat is de aarde?
-      Number(daily.daylight_duration[d] / 3600),                     // N: Aantal uren zonlicht
-      Number(getAvgForDay(hourly.cloudcover, d) / 100),               // O: Hoe bewolkt is het?
-      Number(getAvgForDay(hourly.cloudcover_high, d) / 100),          // P: Hoge bewolking
-      Number(getAvgForDay(hourly.cloudcover_low, d) / 100),           // Q: Lage bewolking
-      Number(getAvgForDay(hourly.freezinglevel_height, d)),           // R: Hoe hoog in de lucht vriest het?
-      daily.temperature_2m_min[d] < 2 ? "JA" : "NEE",                // S: Directe vorstwaarschuwing
-      Number(daily.apparent_temperature_max[d]),                     // T: Hitte index
+      Number(daily.precipitation_sum[d]),                              // G: Hoeveelheid regen in mm
+      Number(getAvgForDay(hourly.surface_pressure, d)),                // H: Luchtdruk (gemiddelde)
+      Number(daily.windspeed_10m_max[d] / 3.6),                        // I: Wind in meter per seconde
+      Number(daily.winddirection_10m_dominant[d]),                     // J: Waar komt de wind vandaan?
+      Number(getAvgForDay(hourly.relativehumidity_2m, d) / 100),       // K: Vochtigheid van de lucht
+      Number(getAvgForDay(hourly.soil_temperature_6cm, d)),            // L: Temperatuur van de aarde
+      Number(getAvgForDay(hourly.soil_moisture_3_to_9cm, d)),          // M: Hoe nat is de aarde?
+      Number(daily.daylight_duration[d] / 3600),                       // N: Aantal uren zonlicht
+      Number(getAvgForDay(hourly.cloudcover, d) / 100),                // O: Hoe bewolkt is het?
+      Number(getAvgForDay(hourly.cloudcover_high, d) / 100),           // P: Hoge bewolking
+      Number(getAvgForDay(hourly.cloudcover_low, d) / 100),            // Q: Lage bewolking
+      Number(getAvgForDay(hourly.freezinglevel_height, d)),            // R: Hoe hoog in de lucht vriest het?
+      daily.temperature_2m_min[d] < 2 ? "JA" : "NEE",                  // S: Directe vorstwaarschuwing
+      Number(daily.apparent_temperature_max[d]),                       // T: Hitte index
       (daily.temperature_2m_max[d] > 10 && daily.precipitation_sum[d] < 2) ? "GUNSTIG" : "MATIG/SLECHT", // U: Plantconditie
       (daily.temperature_2m_max[d] > 18 && daily.precipitation_sum[d] === 0 && daily.windspeed_10m_max[d] < 20) ? "UITSTEKEND" : "NIET IDEAAL", // V: Groei-index
-      Number(daily.et0_fao_evapotranspiration[d]),                   // W: Hoeveel water verdampt er?
-      Utilities.parseDate(daily.sunrise[d], tz, "yyyy-MM-dd'T'HH:mm"),// X: Tijdstip zonsopgang
-      Utilities.parseDate(daily.sunset[d], tz, "yyyy-MM-dd'T'HH:mm"), // Y: Tijdstip zonsondergang
-      Number(daily.uv_index_max[d]),                                 // Z: Kracht van de zon (UV)
-      forecastVorst,                                                 // AA: Onze nachtvorst voorspelling
-      timestamp                                                      // AB: De 'stempel' van wanneer dit gelogd is
+      Number(daily.et0_fao_evapotranspiration[d]),                      // W: Hoeveel water verdampt er?
+      Utilities.parseDate(daily.sunrise[d], tz, "yyyy-MM-dd'T'HH:mm"),  // X: Tijdstip zonsopgang
+      Utilities.parseDate(daily.sunset[d], tz, "yyyy-MM-dd'T'HH:mm"),   // Y: Tijdstip zonsondergang
+      Number(daily.uv_index_max[d]),                                    // Z: Kracht van de zon (UV)
+      forecastVorst,                                                    // AA: Onze nachtvorst voorspelling
+      Number(getMaxForDay(hourlyPollen.grass_pollen, d)),               // AB: Gras
+      Number(getMaxForDay(hourlyPollen.alder_pollen, d)),               // AC: Els
+      Number(getMaxForDay(hourlyPollen.ragweed_pollen, d)),             // AD: Ambrosia (Ragweed)
+      Number(getMaxForDay(hourlyPollen.olive_pollen, d)),               // AE: Es (Olijffamilie)
+      Number(getMaxForDay(hourlyPollen.birch_pollen, d)),               // AF: Berk
+      Number(getMaxForDay(hourlyPollen.mugwort_pollen, d)),             // AG: Bijvoet
+      timestamp                                                         // AH: De 'stempel' van wanneer dit gelogd is
     ];
 
     /**
      * STAP: E-MAIL NOTIFICATIE (Alleen voor vandaag: d=0)
      */
     if (d === 0) {
-      const dochterEmail = "vankets.margot@gmail.com"; // VERVANG DIT DOOR HET ECHTE ADRES
-      const et0Vandaag = row[22];
-      const tempMaxVandaag = row[3];
-
-      let reden = "";
-      if (et0Vandaag > 3.5) {
-        reden = "De verdamping is vandaag erg hoog (" + et0Vandaag.toFixed(2) + " mm).";
-      } else if (tempMaxVandaag > 25) {
-        reden = "De temperatuur stijgt boven de 25°C, terracotta potten drogen nu snel uit.";
-      }
-
-      if (reden !== "") {
-        stuurUitdorgingsAlarm(dochterEmail, et0Vandaag, tempMaxVandaag, reden);
-      }
-    }
-
-    /**
-     * ============================================================================
-     * E-MAIL FUNCTIE
-     * ============================================================================
-     */
-    function stuurUitdorgingsAlarm(emailAdres, verdamping, temp, reden) {
-      const onderwerp = "⚠️ Aardbei-Alarm: De piramide heeft dorst!";
-      const bericht = "Dag!\n\nJe automatische plantenwachter heeft een risico op uitdroging gedetecteerd:\n\n" +
-        "- Reden: " + reden + "\n" +
-        "- Voorspelde verdamping: " + verdamping.toFixed(2) + " mm\n" +
-        "- Maximum temperatuur: " + temp.toFixed(1) + " °C\n\n" +
-        "Vergeet niet om de aardbei-piramide vandaag extra water te geven!\n\n" +
-        "Groetjes,\nJe Google Script";
-
-      MailApp.sendEmail(emailAdres, onderwerp, bericht);
-      console.log("Alarm e-mail verzonden naar: " + emailAdres);
+      stuurDroogteEmailViaRowArray(row);
+      checkPollenViaRowArray(row);
     }
 
     /**
@@ -210,16 +220,25 @@ function logDetailedWeatherViaMake(sheet, tz, timestamp) {
      * Is het een nieuwe dag? Dan plakken we die onderaan de lijst.
      */
     const rowIndex = existingDates.indexOf(datumLabel);
+    let doelRij; // Wordt gebruikt om later de focus te zetten
+
     if (rowIndex !== -1) {
       // De datum is gevonden! Overschrijf de rij op die plek.
-      sheet.getRange(rowIndex + 1, 1, 1, row.length).setValues([row]);
+      doelRij = rowIndex + 1;
+      sheet.getRange(doelRij, 1, 1, row.length).setValues([row]);
       console.log("Gegevens vernieuwd voor: " + datumLabel);
     } else {
       // De datum is nieuw: voeg een nieuwe regel toe onderaan de spreadsheet.
       sheet.appendRow(row);
+      doelRij = sheet.getLastRow();
       console.log("Nieuwe dag toegevoegd aan de lijst: " + datumLabel);
     }
-  }
+
+    // De dag van vandaag selecteren (alleen bij de eerste stap van de lus)
+    if (d === 0) {
+      sheet.getRange(doelRij, 1).activate();
+    }
+  } // Einde van de D-lus
 
   /**
    * STAP 8: DE AFWERKING
@@ -233,6 +252,24 @@ function logDetailedWeatherViaMake(sheet, tz, timestamp) {
 
 /**
  * ============================================================================
+ * E-MAIL ALARM FUNCTIE
+ * ============================================================================
+ */
+function stuurUitdorgingsAlarm(emailAdres, verdamping, temp, reden) {
+  const onderwerp = "⚠️ Aardbei-Alarm: De piramide heeft dorst!";
+  const bericht = "Dag!\n\nJe automatische plantenwachter heeft een risico op uitdroging gedetecteerd:\n\n" +
+    "- Reden: " + reden + "\n" +
+    "- Voorspelde verdamping: " + verdamping.toFixed(2) + " mm\n" +
+    "- Maximum temperatuur: " + temp.toFixed(1) + " °C\n\n" +
+    "Vergeet niet om de aardbei-piramide vandaag extra water te geven!\n\n" +
+    "Groetjes,\nJe Google Script";
+
+  MailApp.sendEmail(emailAdres, onderwerp, bericht);
+  console.log("Alarm e-mail verzonden naar: " + emailAdres);
+}
+
+/**
+ * ============================================================================
  * RETRY LOGIC: callMakeWithRetry
  * Waarom? Internetverbindingen kunnen soms haperen. Als Make.com te druk is, 
  * krijgt het script een foutmelding (Code 500). In plaats van op te geven, 
@@ -240,7 +277,7 @@ function logDetailedWeatherViaMake(sheet, tz, timestamp) {
  * ============================================================================
  */
 function callMakeWithRetry(url) {
-  const delays = [15000, 30000, 60000, 120000]; // Wachttijden in milliseconden (15sec, 30sec, 1min, 2min)
+  const delays = [15000, 30000, 60000, 120000]; // Wachttijden in milliseconden
   const maxAttempts = 4; // Maximaal 4 pogingen
 
   for (let i = 0; i < maxAttempts; i++) {
@@ -276,12 +313,13 @@ function callMakeWithRetry(url) {
  */
 function applyFormatting(sheet) {
   // We vertellen Google Sheets welk soort getal in welke kolom staat
-  sheet.getRange("A:A").setNumberFormat("yyyy-mm-dd"); // Datums
+  sheet.getRange("A:A").setNumberFormat("yyyy-mm-dd");  // Datums
   sheet.getRange("B:W").setNumberFormat("#,##0.00");    // Getallen met 2 cijfers na de komma
-  sheet.getRange("K:K").setNumberFormat("0%");         // Procenten voor vochtigheid
-  sheet.getRange("O:Q").setNumberFormat("0%");         // Procenten voor bewolking
-  sheet.getRange("X:Y").setNumberFormat("HH:mm");      // Kloktijden
-  sheet.getRange("AB:AB").setNumberFormat("yyyy-mm-dd HH:mm"); // Tijdstempel van de run
+  sheet.getRange("K:K").setNumberFormat("0%");          // Procenten voor vochtigheid
+  sheet.getRange("O:Q").setNumberFormat("0%");          // Procenten voor bewolking
+  sheet.getRange("X:Y").setNumberFormat("HH:mm");       // Kloktijden
+  sheet.getRange("AB:AG").setNumberFormat("0");         // Pollen
+  sheet.getRange("AH:AH").setNumberFormat("yyyy-mm-dd HH:mm"); // Tijdstempel van de run
 }
 
 function applyConditionalFormatting(sheet, mijnTijdzone) {
@@ -304,9 +342,9 @@ function applyConditionalFormatting(sheet, mijnTijdzone) {
     .setRanges([bereikHeleSheet])
     .build());
 
-  // --- SPECIFIEKE KOLOMMEN (Uit je backup) ---
+  // --- SPECIFIEKE KOLOMMEN ---
 
-  // F: Grondtemp (<0 Rood, <5 Oranje) - Volgorde is belangrijk!
+  // F: Grondtemp (<0 Rood, <5 Oranje)
   rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberLessThan(0).setBackground("#F8D7DA").setRanges([sheet.getRange("F2:F")]).build());
   rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberLessThan(5).setBackground("#FFF3CD").setRanges([sheet.getRange("F2:F")]).build());
 
@@ -330,6 +368,34 @@ function applyConditionalFormatting(sheet, mijnTijdzone) {
   // O: Bewolking (>= 80% Grijs)
   rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(0.8).setBackground("#E2E3E5").setRanges([sheet.getRange("O2:O")]).build());
 
+  // --- POLLEN FORMATTERING (AB t/m AG) ---
+
+  // 1. GRAS POLLEN (Kolom AB) - Zeer allergeen
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(1).setBackground("#FFF2CC").setRanges([sheet.getRange("AB2:AB")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(10).setBackground("#FCE5CD").setRanges([sheet.getRange("AB2:AB")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(50).setBackground("#F8D7DA").setRanges([sheet.getRange("AB2:AB")]).build());
+
+  // 2. ELS & BIJVOET (Kolom AC & AG) - Matig allergeen
+  const matigBereik = [sheet.getRange("AC2:AC"), sheet.getRange("AG2:AG")];
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(30).setBackground("#FFF2CC").setRanges(matigBereik).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(80).setBackground("#FCE5CD").setRanges(matigBereik).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(150).setBackground("#F8D7DA").setRanges(matigBereik).build());
+
+  // 3. AMBROSIA (Kolom AD) - Extreem allergeen (Ragweed)
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(1).setBackground("#FFF2CC").setRanges([sheet.getRange("AD2:AD")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(5).setBackground("#FCE5CD").setRanges([sheet.getRange("AD2:AD")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(20).setBackground("#F8D7DA").setRanges([sheet.getRange("AD2:AD")]).build());
+
+  // 4. ES / OLIJF (Kolom AE) - Sterk allergeen
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(10).setBackground("#FFF2CC").setRanges([sheet.getRange("AE2:AE")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(40).setBackground("#FCE5CD").setRanges([sheet.getRange("AE2:AE")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(100).setBackground("#F8D7DA").setRanges([sheet.getRange("AE2:AE")]).build());
+
+  // 5. BERK (Kolom AF) - Sterk allergeen
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(10).setBackground("#FFF2CC").setRanges([sheet.getRange("AF2:AF")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(50).setBackground("#FCE5CD").setRanges([sheet.getRange("AF2:AF")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThanOrEqualTo(100).setBackground("#F8D7DA").setRanges([sheet.getRange("AF2:AF")]).build());
+
   // Sla alle regels op
   sheet.setConditionalFormatRules(rules);
 
@@ -349,7 +415,6 @@ function highlightTodayRowWithBorders(sheet, timezone) {
   // Maak schoon
   sheet.getRange(2, 1, lastRow, lastCol).setBorder(false, false, false, false, false, false);
 
-  // HAAL DATA OP VANAF RIJ 1 (om de index exact gelijk te laten lopen met het rijnummer)
   const data = sheet.getRange(1, 1, lastRow, 1).getValues();
 
   for (let i = 0; i < data.length; i++) {
@@ -363,16 +428,87 @@ function highlightTodayRowWithBorders(sheet, timezone) {
     }
 
     if (datumTekst === vandaagLabel) {
-      // Omdat we bij rij 1 zijn begonnen met inlezen, is de index i exact (rijnummer - 1)
-      // Dus de werkelijke rij in Sheets is i + 1
       const rijIndex = i + 1;
-
       // Teken de dikke randen
       sheet.getRange(rijIndex, 1, 1, lastCol)
         .setBorder(true, null, true, null, null, null, "#000000", SpreadsheetApp.BorderStyle.SOLID_THICK);
-
-      console.log("Match gevonden! Vandaag (" + vandaagLabel + ") staat op rij: " + rijIndex);
       return;
     }
+  }
+}
+
+function stuurDroogteEmailViaRowArray(row) {
+  const dochterEmail = "vankets.margot@gmail.com";
+  const papaEmail = "bert@vankets.com";
+  const et0Vandaag = row[22];
+  const tempMaxVandaag = row[3];
+
+  let reden = "";
+  if (et0Vandaag > 3.5) {
+    reden = "De verdamping is vandaag erg hoog (" + et0Vandaag.toFixed(2) + " mm).";
+  } else if (tempMaxVandaag > 25) {
+    reden = "De temperatuur stijgt boven de 25°C, terracotta potten drogen nu snel uit.";
+  }
+
+  if (reden !== "") {
+    stuurUitdorgingsAlarm(dochterEmail, et0Vandaag, tempMaxVandaag, reden);
+    stuurUitdorgingsAlarm(papaEmail, et0Vandaag, tempMaxVandaag, reden);
+  }
+}
+
+function checkPollenViaRowArray(row) {
+  const ontvangers = [
+    { telefoon: "32478385741", apiKey: "3716704" },
+    { telefoon: "32468581422", apiKey: "8510233" }
+  ];
+
+  // CONFIGURATIE: Geef hier aan op welke index (kolom-nummer minus 1) 
+  // elke pollensoort in je 'row' array staat.
+  // Voorbeeld: als Grassen in kolom S staat, is de index 18.
+  const pollenMapping = [
+    { naam: "Grassen", index: 27, drempel: 10, soort: "grass_pollen" },
+    { naam: "Elzen", index: 28, drempel: 30, soort: "alder_pollen" },
+    { naam: "Ambrosia", index: 29, drempel: 10, soort: "ragweed_pollen" },
+    { naam: "Olijf/Es", index: 30, drempel: 20, soort: "olive_pollen" },
+    { naam: "Berken", index: 31, drempel: 30, soort: "birch_pollen" },
+    { naam: "Bijvoet", index: 32, drempel: 15, soort: "mugwort_pollen" }
+  ];
+
+  let meldingen = [];
+
+  pollenMapping.forEach(item => {
+    const waarde = row[item.index];
+
+    // Check of de waarde een geldig getal is en boven de drempel van die soort zit
+    if (typeof waarde === 'number' && waarde >= item.drempel) {
+      meldingen.push(`- ${item.naam}: ${waarde.toFixed(1)} gr/m³`);
+    }
+  });
+
+  if (meldingen.length > 0) {
+    const bericht = "⚠️ *Pollen Waarschuwing* ⚠️\n\n" +
+      "De volgende concentraties voor vandaag zijn matig tot hoog:\n\n" +
+      meldingen.join("\n") +
+      "\n\n_Data uit uw plantenlogboek_";
+
+    ontvangers.forEach(persoon => {
+      stuurWhatsApp(persoon.telefoon, persoon.apiKey, bericht);
+    });
+  }
+}
+
+function stuurWhatsApp(telefoon, apiKey, bericht) {
+  // De URL moet 'encoded' zijn zodat spaties en emoticons goed aankomen
+  const url = "https://api.callmebot.com/whatsapp.php?phone=" + telefoon +
+    "&text=" + encodeURIComponent(bericht) +
+    "&apikey=" + apiKey;
+
+  try {
+    const response = UrlFetchApp.fetch(url);
+    if (response.getResponseCode() == 200) {
+      console.log("WhatsApp bericht succesvol verzonden!");
+    }
+  } catch (e) {
+    console.error("Fout bij verzenden WhatsApp: " + e.message);
   }
 }

@@ -139,6 +139,9 @@ function logDetailedWeatherViaMake(sheet, tz, timestamp) {
     );
   }
 
+  // --- NIEUW: VERZAMELBAK VOOR POLLEN DATA ---
+  let allePollenData = [];
+
   /**
    * STAP 5: DE LUS (HET HERHALEN VOOR 4 DAGEN)
    * We gaan nu door een lusje: doe dit voor dag 0 (vandaag), 1, 2 en 3.
@@ -171,12 +174,12 @@ function logDetailedWeatherViaMake(sheet, tz, timestamp) {
      */
     const row = [
       Utilities.formatDate(new Date(daily.time[d]), tz, "yyyy-MM-dd"), // A: Datum
-      Number(daily.temperature_2m_min[d]),                             // B: Laagste luchttemp
-      Number(daily.apparent_temperature_min[d]),                       // C: Hoe koud het echt voelt
-      Number(daily.temperature_2m_max[d]),                             // D: Hoogste luchttemp
-      Number(daily.apparent_temperature_max[d]),                       // E: Hoogste gevoelstemp
+      Number(daily.temperature_2m_min[d]),                            // B: Laagste luchttemp
+      Number(daily.apparent_temperature_min[d]),                      // C: Hoe koud het echt voelt
+      Number(daily.temperature_2m_max[d]),                            // D: Hoogste luchttemp
+      Number(daily.apparent_temperature_max[d]),                      // E: Hoogste gevoelstemp
       Number(Math.min(...hourly.soil_temperature_0cm.slice(startUurIndex, startUurIndex + 24))), // F: Bevriest de grond?
-      Number(daily.precipitation_sum[d]),                              // G: Hoeveelheid regen in mm
+      Number(daily.precipitation_sum[d]),                               // G: Hoeveelheid regen in mm
       Number(getAvgForDay(hourly.surface_pressure, d)),                // H: Luchtdruk (gemiddelde)
       Number(daily.windspeed_10m_max[d] / 3.6),                        // I: Wind in meter per seconde
       Number(daily.winddirection_10m_dominant[d]),                     // J: Waar komt de wind vandaan?
@@ -211,8 +214,10 @@ function logDetailedWeatherViaMake(sheet, tz, timestamp) {
      */
     if (d === 0) {
       stuurDroogteEmailViaRowArray(row);
-      checkPollenViaRowArray(row);
     }
+
+    // --- NIEUW: DATA OPSLAAN VOOR MEERDAAGSE CHECK ---
+    allePollenData.push(row);
 
     /**
      * STAP 7: UPDATEN OF TOEVOEGEN (UPSERT)
@@ -239,6 +244,10 @@ function logDetailedWeatherViaMake(sheet, tz, timestamp) {
       sheet.getRange(doelRij, 1).activate();
     }
   } // Einde van de D-lus
+
+  // --- NIEUW: DE POLLENCHECK VOOR DE KOMENDE 4 DAGEN ---
+  console.log("Gecapteerde pollen data : " + allePollenData);
+  checkPollenVoorMeerdereDagen(allePollenData);
 
   /**
    * STAP 8: DE AFWERKING
@@ -315,6 +324,7 @@ function applyFormatting(sheet) {
   // We vertellen Google Sheets welk soort getal in welke kolom staat
   sheet.getRange("A:A").setNumberFormat("yyyy-mm-dd");  // Datums
   sheet.getRange("B:W").setNumberFormat("#,##0.00");    // Getallen met 2 cijfers na de komma
+  sheet.getRange("M:M").setNumberFormat("#,##0.000");   // bodemvocht
   sheet.getRange("K:K").setNumberFormat("0%");          // Procenten voor vochtigheid
   sheet.getRange("O:Q").setNumberFormat("0%");          // Procenten voor bewolking
   sheet.getRange("X:Y").setNumberFormat("HH:mm");       // Kloktijden
@@ -456,44 +466,121 @@ function stuurDroogteEmailViaRowArray(row) {
   }
 }
 
-function checkPollenViaRowArray(row) {
+// function checkPollenViaRowArray(row) {
+//   // Deze functie laten we staan voor compatibiliteit, maar wordt niet meer aangeroepen in 'main'
+//   const ontvangers = [
+//     { telefoon: "32478385741", apiKey: "3716704" },
+//     { telefoon: "32468581422", apiKey: "8510233" }
+//   ];
+
+//   const pollenMapping = [
+//     { naam: "Grassen",  index: 27, type: "gras" },
+//     { naam: "Elzen",    index: 28, type: "boom" },
+//     { naam: "Ambrosia", index: 29, type: "kruid" },
+//     { naam: "Olijf/Es", index: 30, type: "boom" },
+//     { naam: "Berken",   index: 31, type: "boom" },
+//     { naam: "Bijvoet",  index: 32, type: "kruid" }
+//   ];
+
+//   let meldingen = [];
+
+//   pollenMapping.forEach(item => {
+//     const waarde = row[item.index];
+//     if (typeof waarde === 'number') {
+//       const info = bepaalPollenStatus(waarde, item.type);
+//       if (info.score >= 3) {
+//         meldingen.push(`- *${item.naam}*: ${waarde.toFixed(1)} gr/m³\n  👉 Status: ${info.label} (${info.score}/5)`);
+//       }
+//     }
+//   });
+
+//   if (meldingen.length > 0) {
+//     const bericht = "⚠️ *Pollen Waarschuwing* ⚠️\n\n" +
+//                     "De volgende soorten zijn vandaag verhoogd aanwezig:\n\n" +
+//                     meldingen.join("\n\n") + 
+//                     "\n\n_Bron: Uw plantenlogboek_";
+    
+//     ontvangers.forEach(p => stuurWhatsApp(p.telefoon, p.apiKey, bericht));
+//   }
+// }
+
+/**
+ * Hulpmiddel om de ernst te bepalen op basis van soort en concentratie
+ */
+function bepaalPollenStatus(waarde, type) {
+  let score = 1;
+  let label = "Zeer laag";
+
+  // Drempels bepalen op basis van type
+  let drempels = [];
+  if (type === "gras")  { drempels = [5, 20, 50, 150]; }
+  else if (type === "boom") { drempels = [10, 25, 150, 500]; }
+  else { drempels = [5, 20, 50, 150]; } // Kruid/Ambrosia
+
+  // Score berekenen
+  if (waarde >= drempels[3]) { score = 5; label = "🔴 *ZEER HOOG*"; }
+  else if (waarde >= drempels[2]) { score = 4; label = "🟠 Hoog"; }
+  else if (waarde >= drempels[1]) { score = 3; label = "🟡 Matig"; }
+  else if (waarde >= drempels[0]) { score = 2; label = "🟢 Laag"; }
+  
+  return { score: score, label: label };
+}
+
+/**
+ * NIEUWE FUNCTIE: checkPollenVoorMeerdereDagen
+ * Deze verwerkt de array van 4 dagen en stuurt één gebundeld WhatsApp bericht.
+ */
+function checkPollenVoorMeerdereDagen(alleDagenRows) {
   const ontvangers = [
     { telefoon: "32478385741", apiKey: "3716704" },
     { telefoon: "32468581422", apiKey: "8510233" }
   ];
 
-  // CONFIGURATIE: Geef hier aan op welke index (kolom-nummer minus 1) 
-  // elke pollensoort in je 'row' array staat.
-  // Voorbeeld: als Grassen in kolom S staat, is de index 18.
   const pollenMapping = [
-    { naam: "Grassen", index: 27, drempel: 10, soort: "grass_pollen" },
-    { naam: "Elzen", index: 28, drempel: 30, soort: "alder_pollen" },
-    { naam: "Ambrosia", index: 29, drempel: 10, soort: "ragweed_pollen" },
-    { naam: "Olijf/Es", index: 30, drempel: 20, soort: "olive_pollen" },
-    { naam: "Berken", index: 31, drempel: 30, soort: "birch_pollen" },
-    { naam: "Bijvoet", index: 32, drempel: 15, soort: "mugwort_pollen" }
+    { naam: "Grassen",  index: 27, type: "gras" },
+    { naam: "Elzen",    index: 28, type: "boom" },
+    { naam: "Ambrosia", index: 29, type: "kruid" },
+    { naam: "Olijf/Es", index: 30, type: "boom" },
+    { naam: "Berken",   index: 31, type: "boom" },
+    { naam: "Bijvoet",  index: 32, type: "kruid" }
   ];
 
-  let meldingen = [];
+  let totaalBericht = "🗓️ *POLLENVOORSPELLING* 🗓️\n\n";
+  let heeftRelevanteData = false;
 
-  pollenMapping.forEach(item => {
-    const waarde = row[item.index];
+  alleDagenRows.forEach((row, i) => {
+    const datum = row[0]; // De datum van de dag
+    let dagMeldingen = [];
 
-    // Check of de waarde een geldig getal is en boven de drempel van die soort zit
-    if (typeof waarde === 'number' && waarde >= item.drempel) {
-      meldingen.push(`- ${item.naam}: ${waarde.toFixed(1)} gr/m³`);
+    pollenMapping.forEach(item => {
+      const waarde = row[item.index];
+      if (typeof waarde === 'number') {
+        console.log("Trigger check:", item.naam, waarde, info.score);
+        const info = bepaalPollenStatus(waarde, item.type);
+        // Alleen tonen als score matig (3) of hoger is
+        if (info.score >= 3) {
+          dagMeldingen.push(`- ${item.naam}: ${info.label}`);
+          heeftRelevanteData = true;
+          console.log("Relevante pollen data gevonden voor " + item.naam);
+        }
+      }
+    });
+
+    // Label bepalen (Vandaag vs de datum)
+    const dagLabel = (i === 0) ? "*VANDAAG*" : `*${datum}*`;
+    
+    if (dagMeldingen.length > 0) {
+      totaalBericht += `${dagLabel}:\n${dagMeldingen.join("\n")}\n\n`;
+    } else {
+      totaalBericht += `${dagLabel}:\n 🟢 Lage concentraties\n\n`;
     }
   });
 
-  if (meldingen.length > 0) {
-    const bericht = "⚠️ *Pollen Waarschuwing* ⚠️\n\n" +
-      "De volgende concentraties voor vandaag zijn matig tot hoog:\n\n" +
-      meldingen.join("\n") +
-      "\n\n_Data uit uw plantenlogboek_";
-
-    ontvangers.forEach(persoon => {
-      stuurWhatsApp(persoon.telefoon, persoon.apiKey, bericht);
-    });
+  // Verstuur bericht alleen als er ergens in de 4 dagen relevante pollen zijn
+  if (heeftRelevanteData) {
+    console.log("Relevante pollen data gevonden. Message zal verstuurd worden via Whatsapp");
+    totaalBericht += "_Bron: Uw plantenlogboek_";
+    ontvangers.forEach(p => stuurWhatsApp(p.telefoon, p.apiKey, totaalBericht));
   }
 }
 
